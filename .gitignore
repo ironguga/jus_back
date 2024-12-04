@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+venv/
+env/
+.DS_Store
+uploads/
+database/
+Miniconda3-latest-MacOSX-arm64.sh
