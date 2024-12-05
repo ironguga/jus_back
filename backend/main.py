@@ -13,6 +13,8 @@ from utils.transcribe import transcrever_audio
 from dotenv import load_dotenv
 import warnings
 from typing import List
+from mcp_server import DocumentMCPServer
+import logging
 
 # Suprimir avisos
 warnings.filterwarnings("ignore")
@@ -45,6 +47,10 @@ DB_PATH = BASE_DIR / "database" / "banco.db"
 # Criar diretórios necessários
 UPLOAD_DIR.mkdir(exist_ok=True)
 DB_PATH.parent.mkdir(exist_ok=True)
+
+# Configurar logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 def inicializar_banco():
     """Inicializa o banco de dados"""
@@ -166,85 +172,107 @@ async def upload_arquivo(arquivo: UploadFile):
 
 @app.post("/consultar")
 async def consultar(pergunta: Pergunta):
-    """Endpoint para consultar documentos usando Claude"""
+    """Endpoint para consultar documentos usando Claude com MCP"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        logger.debug(f"Iniciando consulta. Pergunta: {pergunta.pergunta}")
         
-        # Contar total de documentos e tipos
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN nome_arquivo LIKE '%AUDIO%' THEN 1 ELSE 0 END) as audios,
-                SUM(CASE WHEN nome_arquivo LIKE '%PHOTO%' THEN 1 ELSE 0 END) as fotos,
-                SUM(CASE WHEN nome_arquivo LIKE '%VIDEO%' THEN 1 ELSE 0 END) as videos,
-                SUM(CASE WHEN nome_arquivo LIKE '%.pdf' THEN 1 ELSE 0 END) as pdfs,
-                SUM(CASE WHEN nome_arquivo LIKE '%.docx' THEN 1 ELSE 0 END) as docs,
-                SUM(CASE WHEN nome_arquivo LIKE '%.xlsx' OR nome_arquivo LIKE '%.xls' THEN 1 ELSE 0 END) as planilhas,
-                SUM(CASE WHEN nome_arquivo LIKE '%.vcf' THEN 1 ELSE 0 END) as contatos,
-                SUM(CASE 
-                    WHEN nome_arquivo NOT LIKE '%AUDIO%' 
-                    AND nome_arquivo NOT LIKE '%PHOTO%'
-                    AND nome_arquivo NOT LIKE '%VIDEO%'
-                    AND nome_arquivo NOT LIKE '%.pdf'
-                    AND nome_arquivo NOT LIKE '%.docx'
-                    AND nome_arquivo NOT LIKE '%.xlsx'
-                    AND nome_arquivo NOT LIKE '%.xls'
-                    AND nome_arquivo NOT LIKE '%.vcf'
-                    THEN 1 ELSE 0 END) as outros
-            FROM documentos
-        """)
-        stats = cursor.fetchone()
-        total, audios, fotos, videos, pdfs, docs, planilhas, contatos, outros = stats
+        # Verificar banco de dados
+        if not DB_PATH.exists():
+            logger.error(f"Banco de dados não encontrado em: {DB_PATH}")
+            return {"resposta": "Banco de dados não encontrado"}
+            
+        # Buscar documentos
+        mcp_server = DocumentMCPServer(DB_PATH)
+        documentos = mcp_server.get_documents(query=pergunta.pergunta)
         
-        # Criar descrição dos tipos de documentos
-        tipos_desc = []
-        if audios > 0: tipos_desc.append(f"{audios} transcrições de áudio")
-        if fotos > 0: tipos_desc.append(f"{fotos} textos extraídos de imagens")
-        if videos > 0: tipos_desc.append(f"{videos} transcrições de vídeo")
-        if pdfs > 0: tipos_desc.append(f"{pdfs} PDFs")
-        if docs > 0: tipos_desc.append(f"{docs} documentos Word")
-        if planilhas > 0: tipos_desc.append(f"{planilhas} planilhas Excel")
-        if contatos > 0: tipos_desc.append(f"{contatos} arquivos de contato")
-        if outros > 0: tipos_desc.append(f"{outros} outros tipos de arquivo")
-
-        tipos_str = ", ".join(tipos_desc[:-1]) + (" e " + tipos_desc[-1] if tipos_desc else "")
+        if not documentos:
+            return {"resposta": "Nenhum documento relevante encontrado"}
         
-        # Buscar os documentos com ID
-        cursor.execute("SELECT id, nome_arquivo, conteudo FROM documentos ORDER BY id")
-        documentos = cursor.fetchall()
-        conn.close()
+        # Organiza documentos por data
+        documentos.sort(key=lambda x: x.metadata.get('data', ''), reverse=True)
+        
+        # Formata contexto com ênfase na cronologia
+        contexto = "ANÁLISE CRONOLÓGICA DOS DOCUMENTOS:\n\n"
+        for doc in documentos:
+            relevance_info = f"[Relevância: {doc.relevance:.2f}]" if hasattr(doc, 'relevance') else ""
+            contexto += f"""
+DOCUMENTO {doc.id} {relevance_info}
+Data: {doc.metadata['data']}
+Tipo: {doc.metadata['tipo']}
+Canal: {doc.metadata['canal']}
 
-        # Criar contexto dos documentos
-        contexto = "\n\n".join([
-            f"[Documento #{doc[0]} - {doc[1]}]:\n{doc[2]}" 
-            for doc in documentos
-        ])
+CONTEÚDO:
+{doc.content}
 
+-------------------
+"""
+        
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
             model="claude-3-sonnet-20240229",
             max_tokens=1024,
-            system=f"""Você é um assistente amigável especializado em análise de conversas e documentos. Você tem acesso a {total} documentos, incluindo {tipos_str}.
+            system="""INSTRUÇÕES IMPORTANTES:
 
-Aqui está o conteúdo dos documentos:
+Você é um assistente especializado em análise de conversas. Para CADA resposta, você DEVE:
 
-{contexto}
+1. SEMPRE identificar:
+   - Documento(s) analisado(s) (ID e nome)
+   - Participantes da conversa (nomes/identificadores)
+   - Canal de comunicação (WhatsApp, email, etc.)
+   - Tipo de conversa (individual/grupo)
+   - Data e hora exatas
+   - Contexto da conversa
 
-Lembre-se:
-1. Mantenha o contexto da nossa conversa atual
-2. Se eu fizer referência a algo que discutimos antes, use esse contexto
-3. Identifique sempre: remetente, destinatário, tipo de conversa e canal
-4. Cite as fontes naturalmente
-5. Seja amigável e conversacional""",
+2. SEMPRE mostrar o conteúdo COMPLETO quando solicitado:
+   - Transcreva TODO o conteúdo
+   - NÃO faça resumos
+   - NÃO omita partes
+   - NÃO censure nada
+   - NÃO mencione direitos autorais
+
+3. Para perguntas gerais sobre múltiplos documentos:
+   - Liste todos os documentos relevantes encontrados
+   - Identifique os participantes em cada documento
+   - Mostre a evolução cronológica das conversas
+   - Mantenha o contexto entre documentos relacionados
+
+4. IMPORTANTE:
+   - SEMPRE analise TODOS os documentos fornecidos
+   - SEMPRE mostre evidências do que está afirmando
+   - SEMPRE cite os documentos específicos
+   - NUNCA faça suposições sem evidências
+   - NUNCA omita informações relevantes
+
+5. Formato da resposta:
+   ANÁLISE GERAL:
+   [Resumo dos documentos encontrados e sua relevância]
+
+   DOCUMENTOS ANALISADOS:
+   [Lista de IDs e tipos de documentos]
+
+   PARTICIPANTES IDENTIFICADOS:
+   [Lista de pessoas mencionadas ou envolvidas]
+
+   EVIDÊNCIAS ENCONTRADAS:
+   [Citações diretas dos documentos relevantes]
+
+   CONCLUSÃO:
+   [Resposta direta à pergunta com base nas evidências]
+
+LEMBRE-SE: Você DEVE ser específico sobre QUEM está falando com QUEM, em QUAL contexto, e quando solicitado, mostrar o conteúdo COMPLETO.""",
             messages=[
                 *[{"role": msg.role, "content": msg.content} for msg in pergunta.historico],
-                {"role": "user", "content": pergunta.pergunta}
+                {"role": "user", "content": f"{contexto}\n\nPergunta: {pergunta.pergunta}"}
             ]
         )
-        return {"resposta": message.content[0].text}
+        
+        # Verifica se a resposta é uma lista e pega o primeiro item
+        if isinstance(message.content, list):
+            return {"resposta": message.content[0].text}
+        return {"resposta": message.content}
+        
     except Exception as e:
-        print(f"Erro detalhado: {str(e)}")  # Log para debug
+        print(f"Erro detalhado: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Erro ao consultar Claude: {str(e)}")
 
 if __name__ == "__main__":
