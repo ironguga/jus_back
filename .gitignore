@@ -7,3 +7,6 @@ env/
 uploads/
 database/
 Miniconda3-latest-MacOSX-arm64.sh
+# Logs
+logs/
+*.log
