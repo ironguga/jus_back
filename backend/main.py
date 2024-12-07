@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import logging
 import os
@@ -14,9 +15,14 @@ from dotenv import load_dotenv
 
 from utils.queue_manager import QueueManager
 from utils.db_manager import DatabaseManager
-from mcp_server import DocumentMCPServer
 from utils.statistics import ProcessingStats
 from utils.path_manager import PathManager
+from utils.mcp_server import DocumentMCPServer
+
+from utils.document_processor import DocumentProcessor
+from utils.image_processor import ImageProcessor
+from utils.video_processor import VideoProcessor
+from utils.transcribe import AudioProcessor as WhisperAudioProcessor
 
 warnings.filterwarnings("ignore")
 load_dotenv()
@@ -24,7 +30,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuração da API
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Diretórios base
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 DB_PATH = BASE_DIR / "database" / "banco.db"
@@ -51,151 +55,21 @@ class Mensagem(BaseModel):
     role: str
     content: str
 
-class Pergunta(BaseModel):
-    pergunta: str
-    historico: List[Mensagem] = []
-
 class ConsultaRequest(BaseModel):
     pergunta: str
     historico: List[Mensagem] = []
 
-async def process_audio_task(message: dict):
-    try:
-        logger.info(f"[AUDIO_TASK] Iniciando processamento de áudio: {message}")
-        for field in ['file_path', 'file_name', 'processed_dir', 'unprocessed_dir']:
-            if field not in message:
-                raise ValueError(f"[AUDIO_TASK] Campo obrigatório ausente: {field}")
-        
-        file_path = Path(message['file_path'])
-        if not file_path.exists():
-            logger.error(f"[AUDIO_TASK] Arquivo não encontrado: {file_path}")
-            return
-
-        logger.info(f"[AUDIO_TASK] Chamando mcp_server.process_audio para {file_path}")
-        await mcp_server.process_audio(
-            file_path=str(file_path),
-            file_name=message['file_name'],
-            processed_dir=message['processed_dir'],
-            unprocessed_dir=message['unprocessed_dir']
-        )
-        logger.info(f"[AUDIO_TASK] Processamento de áudio concluído: {file_path}")
-    except Exception as e:
-        logger.error(f"[AUDIO_TASK] Erro processando áudio: {e}")
-
-async def process_document_task(message: dict):
-    try:
-        logger.info(f"[DOC_TASK] Iniciando processamento de documento: {message}")
-        for field in ['file_path', 'file_name', 'processed_dir', 'unprocessed_dir']:
-            if field not in message:
-                raise ValueError(f"[DOC_TASK] Campo obrigatório ausente: {field}")
-
-        file_path = Path(message['file_path'])
-        if not file_path.exists():
-            logger.error(f"[DOC_TASK] Arquivo não encontrado: {file_path}")
-            return
-
-        logger.info(f"[DOC_TASK] Chamando mcp_server.process_document para {file_path}")
-        await mcp_server.process_document(
-            file_path=str(file_path),
-            file_name=message['file_name'],
-            processed_dir=message['processed_dir'],
-            unprocessed_dir=message['unprocessed_dir']
-        )
-        logger.info(f"[DOC_TASK] Processamento de documento concluído: {file_path}")
-    except Exception as e:
-        logger.error(f"[DOC_TASK] Erro processando documento: {str(e)}")
-
-async def process_image_task(message: dict):
-    try:
-        logger.info(f"[IMAGE_TASK] Iniciando processamento de imagem: {message}")
-        for field in ['file_path', 'file_name', 'processed_dir', 'unprocessed_dir']:
-            if field not in message:
-                raise ValueError(f"[IMAGE_TASK] Campo obrigatório ausente: {field}")
-
-        file_path = Path(message['file_path'])
-        if not file_path.exists():
-            logger.error(f"[IMAGE_TASK] Arquivo não encontrado: {file_path}")
-            return
-
-        logger.info(f"[IMAGE_TASK] Chamando mcp_server.process_image para {file_path}")
-        success = await mcp_server.process_image(
-            file_path=str(file_path),
-            file_name=message['file_name'],
-            processed_dir=message['processed_dir'],
-            unprocessed_dir=message['unprocessed_dir']
-        )
-
-        if success:
-            logger.info(f"[IMAGE_TASK] Imagem processada com sucesso: {file_path}")
-        else:
-            logger.error("[IMAGE_TASK] Falha no processamento da imagem")
-    except Exception as e:
-        logger.error(f"[IMAGE_TASK] Erro processando imagem: {e}")
-
-async def process_video_task(message: dict):
-    try:
-        logger.info(f"[VIDEO_TASK] Iniciando processamento de vídeo: {message}")
-        for field in ['file_path', 'file_name', 'processed_dir', 'unprocessed_dir']:
-            if field not in message:
-                raise ValueError(f"[VIDEO_TASK] Campo obrigatório ausente: {field}")
-        
-        file_path = Path(message['file_path'])
-        if not file_path.exists():
-            logger.error(f"[VIDEO_TASK] Arquivo não encontrado: {file_path}")
-            return
-
-        logger.info(f"[VIDEO_TASK] Chamando mcp_server.process_video para {file_path}")
-        success = await mcp_server.process_video(
-            file_path=str(file_path),
-            file_name=message['file_name'],
-            processed_dir=message['processed_dir'],
-            unprocessed_dir=message['unprocessed_dir']
-        )
-        if success:
-            logger.info(f"[VIDEO_TASK] Vídeo processado com sucesso: {file_path}")
-        else:
-            logger.error("[VIDEO_TASK] Falha no processamento do vídeo")
-    except Exception as e:
-        logger.error(f"[VIDEO_TASK] Erro processando vídeo: {e}")
-
-async def start_queue_processors():
-    """Inicia consumidores/consumidores para cada tipo de fila"""
-    try:
-        processors = {
-            'audio': process_audio_task,
-            'document': process_document_task,
-            'image': process_image_task,
-            'video': process_video_task
-        }
-
-        tasks = []
-        for queue_type, processor in processors.items():
-            queue_name = f"{queue_type}_processing"
-            logger.info(f"[INIT] Iniciando processador para fila: {queue_name}")
-            task = asyncio.create_task(
-                queue_manager.process_queue(queue_name, processor)
-            )
-            tasks.append(task)
-        
-        app.state.processor_tasks = tasks
-        logger.info("[INIT] Todos os processadores de fila iniciados")
-    except Exception as e:
-        logger.error(f"[INIT] Erro ao iniciar processadores: {e}")
-        raise
-
 async def init_database():
-    """Inicializa o banco de dados"""
     try:
-        db_manager = DatabaseManager(DB_PATH)
-        await db_manager.initialize()
-        return db_manager
+        db_mgr = DatabaseManager(DB_PATH)
+        await db_mgr.initialize()
+        return db_mgr
     except Exception as e:
         logger.error(f"Erro inicializando banco de dados: {e}")
         raise
 
 @app.on_event("startup")
 async def startup_event():
-    """Evento de inicialização da aplicação"""
     global db_manager, mcp_server, queue_manager
     
     try:
@@ -203,19 +77,33 @@ async def startup_event():
         db_manager = await init_database()
         logger.info("Banco de dados inicializado")
         
-        # Inicializa os diretórios
         PathManager.initialize()
-        
+
+        # Inicializa processadores
+        doc_processor = DocumentProcessor()
+        await doc_processor.initialize()
+        img_processor = ImageProcessor()
+        await img_processor.initialize()
+        vid_processor = VideoProcessor()
+        await vid_processor.initialize()
+        audio_processor = WhisperAudioProcessor()
+
         logger.info("[STARTUP] Iniciando MCP Server...")
         mcp_server = DocumentMCPServer(db_manager)
-        await mcp_server.initialize()
+        # Injetando processadores no MCP Server
+        mcp_server.document_processor = doc_processor
+        mcp_server.image_processor = img_processor
+        mcp_server.video_processor = vid_processor
+        mcp_server.audio_processor = audio_processor
+
+        await mcp_server.initialize()  
         logger.info("MCP Server inicializado")
         
-        logger.info("[STARTUP] Iniciando Queue Manager...")
+        from utils.queue_manager import QueueManager
         queue_manager = QueueManager(AMQP_URL, mcp_server)
         await queue_manager.initialize()
-        
-        # Configura os consumidores
+
+        # Configura consumidores
         await queue_manager.setup_consumer('audio_processing', queue_manager.process_audio_message)
         await queue_manager.setup_consumer('document_processing', queue_manager.process_document_message)
         await queue_manager.setup_consumer('image_processing', queue_manager.process_image_message)
@@ -229,67 +117,17 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Finaliza conexões ao encerrar o servidor"""
     try:
         logger.info("[SHUTDOWN] Finalizando conexões...")
-        processor_tasks = getattr(app.state, 'processor_tasks', [])
-        for task in processor_tasks:
-            if not task.done():
-                task.cancel()
-
         if queue_manager:
             await queue_manager.close()
         if mcp_server:
             await mcp_server.close()
         if db_manager:
             await db_manager.close()
-
         logger.info("[SHUTDOWN] Conexões fechadas com sucesso")
     except Exception as e:
         logger.error(f"[SHUTDOWN] Erro ao finalizar conexões: {str(e)}")
-
-@app.post("/upload")
-async def upload_file(file: UploadFile):
-    try:
-        logger.info("[UPLOAD] Recebendo arquivo ZIP...")
-        zip_path = UPLOAD_DIR / file.filename
-        with zip_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        logger.info("[UPLOAD] Iniciando processamento do ZIP...")
-        result = await process_zip(zip_path=zip_path)
-
-        # Verifica status das filas
-        for queue_type in ['audio', 'document', 'image', 'video']:
-            queue_name = f"{queue_type}_processing"
-            await queue_manager.check_queue_status(queue_name)
-            
-        return result
-
-    except Exception as e:
-        logger.error(f"[UPLOAD] Erro no upload: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/consultar")
-async def consultar(request: ConsultaRequest):
-    try:
-        # Primeiro, vamos listar todos os documentos
-        docs = await db_manager.list_all_documents()
-        
-        if not docs:
-            return {"resposta": "Nenhum documento relevante encontrado"}
-            
-        # Formata a resposta com conteúdo
-        resposta = "Documentos processados:\n\n"
-        for doc in docs:
-            resposta += f"- {doc['file_name']} ({doc['file_type']})\n"
-            resposta += f"  Conteúdo: {doc['content'][:200]}...\n\n"  # Mostra os primeiros 200 caracteres
-            
-        return {"resposta": resposta}
-        
-    except Exception as e:
-        logger.error(f"Erro na consulta: {e}")
-        return {"resposta": f"Erro ao processar consulta: {str(e)}"}
 
 def get_file_type(filename: str) -> str:
     ext = Path(filename).suffix.lower()
@@ -305,7 +143,7 @@ def get_file_type(filename: str) -> str:
 
 async def process_zip(zip_path: Path):
     try:
-        logger.info(f"[ZIP] Processando arquivo ZIP: {zip_path}")
+        logger.info("[ZIP] Processando arquivo ZIP: %s", zip_path)
         stats = ProcessingStats()
         with zipfile.ZipFile(zip_path) as zip_ref:
             all_files = zip_ref.namelist()
@@ -313,73 +151,123 @@ async def process_zip(zip_path: Path):
             stats.total_files = len(valid_files)
 
             for arquivo_nome in all_files:
+                arquivo_path = UPLOAD_DIR / arquivo_nome
                 try:
-                    arquivo_path = UPLOAD_DIR / arquivo_nome
                     zip_ref.extract(arquivo_nome, UPLOAD_DIR)
-
                     file_type = get_file_type(arquivo_nome)
                     if file_type and arquivo_path.is_file():
-                        task_data = {
-                            'file_path': str(arquivo_path),
-                            'file_name': arquivo_nome,
-                            'processed_dir': str(PathManager.PROCESSED_DIR),
-                            'unprocessed_dir': str(PathManager.UNPROCESSED_DIR)
-                        }
-                        logger.info(f"[ZIP] Enfileirando tarefa para {arquivo_nome} na fila {file_type}_processing")
-                        await queue_manager.enqueue_task(file_type, task_data)
+                        # Processamento imediato
+                        content_data = None
+                        if file_type == 'audio':
+                            transcription = await mcp_server.audio_processor.transcribe_audio(str(arquivo_path))
+                            content_data = {
+                                "type": "audio",
+                                "content": transcription,
+                                "metadata": {
+                                    "file_name": arquivo_nome,
+                                    "file_type": "audio"
+                                }
+                            }
+                        elif file_type == 'image':
+                            text = await mcp_server.image_processor.process(str(arquivo_path))
+                            content_data = {
+                                "type": "image",
+                                "content": text,
+                                "metadata": {
+                                    "file_name": arquivo_nome,
+                                    "file_type": "image"
+                                }
+                            }
+                        elif file_type == 'document':
+                            text = await mcp_server.document_processor.process(str(arquivo_path))
+                            content_data = {
+                                "type": "document",
+                                "content": text,
+                                "metadata": {
+                                    "file_name": arquivo_nome,
+                                    "file_type": "document"
+                                }
+                            }
+                        elif file_type == 'video':
+                            text = await mcp_server.video_processor.process(str(arquivo_path))
+                            content_data = {
+                                "type": "video",
+                                "content": text,
+                                "metadata": {
+                                    "file_name": arquivo_nome,
+                                    "file_type": "video"
+                                }
+                            }
+
+                        if content_data:
+                            # Salva no banco
+                            await db_manager.save_processed_content(content_data)
+                            # Move para processed
+                            processed_path = PathManager.get_processed_path(arquivo_nome)
+                            os.rename(arquivo_path, processed_path)
+                            stats.saved_to_db += 1
                         stats.processed_files += 1
                     else:
-                        logger.warning(f"[ZIP] Arquivo não suportado ou não é arquivo regular: {arquivo_nome}")
+                        logger.warning("[ZIP] Arquivo não suportado: %s", arquivo_nome)
                         if arquivo_path.is_file():
-                            shutil.move(str(arquivo_path), str(PathManager.UNPROCESSED_DIR / arquivo_nome))
+                            shutil.move(str(arquivo_path), str(PathManager.get_unprocessed_path(arquivo_nome)))
                         stats.failed_files += 1
                         stats.add_error(arquivo_nome, "Tipo de arquivo não suportado")
-
                 except Exception as e:
-                    logger.error(f"[ZIP] Erro processando arquivo {arquivo_nome}: {str(e)}")
-                    extracted_file = UPLOAD_DIR / arquivo_nome
-                    if extracted_file.exists():
-                        shutil.move(str(extracted_file), str(PathManager.UNPROCESSED_DIR / arquivo_nome))
+                    logger.error("[ZIP] Erro processando arquivo %s: %s", arquivo_nome, str(e))
+                    if arquivo_path.exists():
+                        shutil.move(str(arquivo_path), str(PathManager.get_unprocessed_path(arquivo_nome)))
                     stats.failed_files += 1
                     stats.add_error(arquivo_nome, str(e))
 
         stats.save_log(zip_path.name)
         logger.info("[ZIP] Processamento do ZIP concluído. Estatísticas salvas.")
         
+        # Reinicializa índice após novos documentos
+        await mcp_server.initialize()
+
         return {
             "mensagem": "Processamento iniciado",
             "estatisticas": stats.to_dict()
         }
 
     except Exception as e:
-        logger.error(f"[ZIP] Erro processando ZIP: {str(e)}")
+        logger.error("[ZIP] Erro processando ZIP: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/upload")
+async def upload_file(file: UploadFile):
+    try:
+        logger.info("[UPLOAD] Recebendo arquivo ZIP...")
+        zip_path = UPLOAD_DIR / file.filename
+        with zip_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        logger.info("[UPLOAD] Iniciando processamento do ZIP...")
+        result = await process_zip(zip_path=zip_path)
+        return result
+
+    except Exception as e:
+        logger.error("[UPLOAD] Erro no upload: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/consultar")
+async def consultar(request: ConsultaRequest):
+    try:
+        resposta = await mcp_server.process_query(request.pergunta)
+        return {"resposta": resposta}
+    except Exception as e:
+        logger.error("Erro na consulta: %s", str(e))
+        return {"resposta": f"Erro ao processar consulta: {str(e)}"}
 
 @app.get("/status")
 async def check_status():
-    try:
-        logger.info("[STATUS] Verificando status...")
-        processor_tasks = getattr(app.state, 'processor_tasks', [])
-        active_processors = [task for task in processor_tasks if not task.done() and not task.cancelled()]
-
-        return {
-            "status": "running" if active_processors else "stopped",
-            "active_processors": len(active_processors),
-            "total_processors": len(processor_tasks)
-        }
-    except Exception as e:
-        logger.error(f"[STATUS] Erro ao verificar status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "running"}
 
 @app.post("/purge-queues")
 async def purge_queues():
-    try:
-        logger.info("[PURGE] Purga de filas solicitada...")
-        await queue_manager.purge_queues()
-        return {"message": "Filas limpas com sucesso"}
-    except Exception as e:
-        logger.error(f"[PURGE] Erro ao limpar filas: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    await queue_manager.purge_queues()
+    return {"message": "Filas limpas"}
 
 @app.post("/process-file")
 async def process_file(file: UploadFile):
@@ -392,43 +280,64 @@ async def process_file(file: UploadFile):
 
         file_type = get_file_type(file.filename)
         if not file_type:
-            logger.warning(f"[PROCESS_FILE] Tipo de arquivo não suportado: {file.filename}")
+            logger.warning("[PROCESS_FILE] Tipo de arquivo não suportado: %s", file.filename)
             unprocessed_path = PathManager.get_unprocessed_path(file.filename)
             shutil.move(str(file_path), str(unprocessed_path))
             return {"message": f"Tipo de arquivo não suportado: {file.filename}"}
 
-        message = {
-            "file_path": str(file_path),
-            "file_name": file.filename,
-            "processed_dir": str(PathManager.PROCESSED_DIR),
-            "unprocessed_dir": str(PathManager.UNPROCESSED_DIR)
-        }
+        content_data = None
+        if file_type == 'audio':
+            transcription = await mcp_server.audio_processor.transcribe_audio(str(file_path))
+            content_data = {
+                "type": "audio",
+                "content": transcription,
+                "metadata": {
+                    "file_name": file.filename,
+                    "file_type": "audio"
+                }
+            }
+        elif file_type == 'image':
+            text = await mcp_server.image_processor.process(str(file_path))
+            content_data = {
+                "type": "image",
+                "content": text,
+                "metadata": {
+                    "file_name": file.filename,
+                    "file_type": "image"
+                }
+            }
+        elif file_type == 'document':
+            text = await mcp_server.document_processor.process(str(file_path))
+            content_data = {
+                "type": "document",
+                "content": text,
+                "metadata": {
+                    "file_name": file.filename,
+                    "file_type": "document"
+                }
+            }
+        elif file_type == 'video':
+            text = await mcp_server.video_processor.process(str(file_path))
+            content_data = {
+                "type": "video",
+                "content": text,
+                "metadata": {
+                    "file_name": file.filename,
+                    "file_type": "video"
+                }
+            }
 
-        logger.info(f"[PROCESS_FILE] Enfileirando tarefa para {file.filename} na fila {file_type}_processing")
-        await queue_manager.enqueue_task(file_type, message)
+        if content_data:
+            await db_manager.save_processed_content(content_data)
+            processed_path = PathManager.get_processed_path(file.filename)
+            os.rename(file_path, processed_path)
+            await mcp_server.initialize()
 
-        return {"message": f"Arquivo {file.filename} enviado para processamento"}
+        return {"message": f"Arquivo {file.filename} processado e salvo"}
 
     except Exception as e:
-        logger.error(f"[PROCESS_FILE] Erro processando arquivo: {e}")
+        logger.error("[PROCESS_FILE] Erro processando arquivo: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
-
-async def init_queue_processors():
-    """Inicializa os processadores de fila"""
-    try:
-        queue_manager = QueueManager()
-        await queue_manager.initialize()
-        
-        # Configura os callbacks para cada tipo de fila
-        await queue_manager.setup_consumer('audio_processing', queue_manager.process_audio_message)
-        await queue_manager.setup_consumer('image_processing', queue_manager.process_image_message)
-        # ... outros consumidores ...
-        
-        logger.info("Todos os processadores de fila iniciados")
-        
-    except Exception as e:
-        logger.error(f"Erro ao inicializar processadores: {e}")
-        raise
 
 if __name__ == "__main__":
     import uvicorn

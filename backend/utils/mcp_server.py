@@ -1,95 +1,83 @@
-import sqlite3
+# utils/mcp_server.py
 import logging
-from pathlib import Path
-from typing import Dict, List
 import os
 import asyncio
+from pathlib import Path
+from typing import List
+import sqlite3
+
 from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
 from dotenv import load_dotenv
+
+# Aqui não utilizamos vector_index ou sumarização, pois vamos enviar tudo
+# diretamente ao modelo. Caso queira manter sumarização, pode fazê-lo,
+# porém não faremos filtragem, retornaremos todos os documentos.
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 class DocumentMCPServer:
-    def __init__(self, db_manager=None):
+    def __init__(self, db_manager):
         self.db_manager = db_manager
         self.anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         if not os.getenv("ANTHROPIC_API_KEY"):
             raise ValueError("ANTHROPIC_API_KEY não configurada")
         self._initialized = False
 
+        # Processadores serão injetados no startup
+        self.document_processor = None
+        self.image_processor = None
+        self.video_processor = None
+        self.audio_processor = None
+
     async def initialize(self):
         logger.info("Inicializando MCP Server...")
+        docs = await self.db_manager.list_all_processed_documents()
+
+        if not docs or len(docs) == 0:
+            logger.warning("Nenhum documento processado encontrado.")
+        else:
+            logger.info(f"{len(docs)} documentos disponíveis para análise.")
+
         self._initialized = True
         logger.info("MCP Server inicializado com sucesso.")
 
     async def process_query(self, query: str) -> str:
-        """Processa a query usando Anthropic e retorna a resposta do modelo."""
         try:
-            # Caminho para o banco de dados
-            db_path = Path(__file__).parents[1] / "database" / "banco.db"
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
+            if not self._initialized:
+                return "O servidor não foi inicializado corretamente."
 
-            # Contagem de documentos por tipo
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN file_type = 'audio' THEN 1 ELSE 0 END) as audios,
-                    SUM(CASE WHEN file_type = 'image' THEN 1 ELSE 0 END) as fotos,
-                    SUM(CASE WHEN file_type = 'video' THEN 1 ELSE 0 END) as videos,
-                    SUM(CASE WHEN file_type = 'document' THEN 1 ELSE 0 END) as docs
-                FROM processed_content
-            """)
-            stats = cursor.fetchone()
-            total, audios, fotos, videos, docs = stats if stats else (0,0,0,0,0)
+            # Obtém todos os documentos sem filtragem
+            all_docs = await self.db_manager.list_all_processed_documents()
 
-            # Busca todos os documentos processados
-            cursor.execute("""
-                SELECT id, file_name, file_type, content 
-                FROM processed_content 
-                ORDER BY id
-            """)
-            documentos = cursor.fetchall()
-            conn.close()
+            if not all_docs:
+                # Caso não haja docs
+                full_prompt = f"""{HUMAN_PROMPT}Você é um assistente amigável e útil.
+Não há documentos disponíveis.
 
-            # Descrição dos tipos de documentos disponíveis
-            tipos_desc = []
-            if audios > 0: tipos_desc.append(f"{audios} transcrições de áudio")
-            if fotos > 0: tipos_desc.append(f"{fotos} textos extraídos de imagens")
-            if videos > 0: tipos_desc.append(f"{videos} transcrições de vídeo")
-            if docs > 0: tipos_desc.append(f"{docs} documentos")
+Pergunta do usuário:
+{query}
 
-            if len(tipos_desc) > 1:
-                tipos_str = ", ".join(tipos_desc[:-1]) + " e " + tipos_desc[-1]
-            elif tipos_desc:
-                tipos_str = tipos_desc[0]
+Responda de forma útil, mesmo sem documentos, ou diga que não encontrou nada.
+{AI_PROMPT}"""
             else:
-                tipos_str = "nenhum documento disponível"
+                # Constrói o contexto com todos os documentos
+                # Se o número de docs e tamanho for muito grande, isso pode estourar o contexto do modelo
+                contexto = "\n\n".join([
+                    f"[Documento #{doc['id']} - {doc['file_name']} ({doc['file_type']}): {doc['content']}"
+                    for doc in all_docs
+                ])
 
-            # Contexto com o conteúdo dos documentos
-            contexto = "\n\n".join([
-                f"[Documento #{doc[0]} - {doc[1]} ({doc[2]})]: {doc[3]}"
-                for doc in documentos
-            ])
+                full_prompt = f"""{HUMAN_PROMPT}Você é um assistente amigável, útil e especialista em analisar documentos.
+Você tem acesso a todos os documentos a seguir:
 
-            full_prompt = f"""{HUMAN_PROMPT}Você é um assistente amigável especializado em análise de conversas e documentos.
-Você tem acesso a {total} documentos, incluindo {tipos_str}.
-
-Aqui está o conteúdo dos documentos:
 {contexto}
 
-Lembre-se:
-1. Mantenha o contexto da conversa atual
-2. Se houver referência a algo discutido antes, use esse contexto
-3. Identifique sempre: remetente, destinatário, tipo de conversa e canal
-4. Cite as fontes naturalmente
-5. Seja amigável e conversacional
-6. Responda em português
+Você pode usar todo o conteúdo desses documentos para responder à pergunta do usuário. Seja específico, contextual, cite as fontes ([Documento #id]) conforme necessário. Mantenha o tom amigável e conversacional, e responda em português.
 
+Pergunta do usuário:
 {query}{AI_PROMPT}"""
 
-            # Chamada síncrona da Anthropic usando executor assíncrono
             response = await asyncio.to_thread(
                 self.anthropic.completions.create,
                 model="claude-2",
@@ -101,16 +89,7 @@ Lembre-se:
 
         except Exception as e:
             logger.error(f"Erro processando query: {e}")
-            raise
-
-    async def search_documents(self, query_info: str) -> List[Dict]:
-        return []
-
-    async def extract_relevant_context(self, documents: List[Dict], query: str) -> str:
-        return ""
-
-    async def generate_response(self, context: str, query: str) -> str:
-        return context
+            return f"Erro ao processar consulta: {str(e)}"
 
     async def close(self):
         pass
