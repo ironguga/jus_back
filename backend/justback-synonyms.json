@@ -1,0 +1,5 @@
+{
+    "name": "justback-synonyms",
+    "format": "solr",
+    "synonyms": "imagem,foto,picture\ndocumento,arquivo,doc,file\náudio,som,gravação,audio,sound,recording\nvídeo,filme,gravação,video,movie,clip\ncontrato,acordo,pacto,agreement,deal\nassinatura,firma,rubrica,signature\ncompra,aquisição,transação,purchase,transaction\ncliente,comprador,consumidor,customer,client\nfornecedor,vendedor,prestador,supplier,vendor\nprojeto,plano,design,blueprint,plan\ntecido,pano,material,fabric,cloth\nlençol,manta,cobertor,sheet,blanket\ntranscrição,legenda,texto,transcription,subtitle,text\nimagem,ilustração,desenho,graphic,illustration,drawing\ndescrição,resumo,sumário,description,summary\nmetadados,metadata,info\nprocessado,analisado,processed,analyzed"
+  }

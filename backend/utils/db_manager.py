@@ -25,6 +25,10 @@ class DatabaseManager:
         self._pool_lock = Lock()
         
     async def initialize(self):
+        """
+        Inicializa o banco de dados, criando as tabelas se necessário,
+        e prepara o pool de conexões.
+        """
         os.makedirs(self.db_path.parent, exist_ok=True)
         self.conn = await aiosqlite.connect(self.db_path)
         self.cursor = await self.conn.cursor()
@@ -57,6 +61,7 @@ class DatabaseManager:
         async with self._pool_lock:
             for _ in range(self.pool_size):
                 conn = await aiosqlite.connect(self.db_path)
+                # Ajustes de performance
                 await conn.execute("PRAGMA journal_mode=WAL")
                 await conn.execute("PRAGMA synchronous=NORMAL")
                 await conn.execute("PRAGMA cache_size=-64000")
@@ -66,6 +71,10 @@ class DatabaseManager:
 
     @asynccontextmanager
     async def get_connection(self):
+        """
+        Obtém uma conexão do pool para uso dentro de um contexto async.
+        Ao finalizar o bloco 'with', a conexão é devolvida ao pool.
+        """
         async with self._pool_lock:
             if self._connection_pool:
                 conn = self._connection_pool.pop()
@@ -84,6 +93,19 @@ class DatabaseManager:
                 await conn.close()
 
     async def save_processed_content(self, content_data: dict):
+        """
+        Salva conteúdo processado no banco, evitando duplicados.
+        content_data formato:
+        {
+          "type": "document",
+          "content": "<texto extraído>",
+          "metadata": {
+             "file_name": "arquivo.ext",
+             "file_type": "document",
+             ... outros metadados ...
+          }
+        }
+        """
         try:
             logger.info(f"Tentando salvar conteúdo no banco: {content_data['metadata']['file_name']}")
             async with self.get_connection() as conn:
@@ -121,6 +143,11 @@ class DatabaseManager:
             raise
 
     async def list_all_processed_documents(self):
+        """
+        Lista todos os documentos processados, ordenados pela data de criação desc.
+        Retorna uma lista de dicts.
+        Em um caso real, você poderia implementar paginação aqui também.
+        """
         try:
             async with self.get_connection() as conn:
                 cursor = await conn.execute('''
@@ -148,6 +175,9 @@ class DatabaseManager:
             return []
 
     async def update_summary(self, doc_id: int, summary: str):
+        """
+        Atualiza o campo 'summary' de um documento pelo ID.
+        """
         try:
             async with self.get_connection() as conn:
                 await conn.execute('UPDATE processed_content SET summary = ? WHERE id = ?', (summary, doc_id))
@@ -156,6 +186,9 @@ class DatabaseManager:
             logger.error(f"Erro ao atualizar sumário: {e}")
 
     async def close(self):
+        """
+        Fecha todas as conexões do pool e a conexão principal.
+        """
         async with self._pool_lock:
             for conn in self._connection_pool:
                 try:
