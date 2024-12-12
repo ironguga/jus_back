@@ -17,8 +17,8 @@ from utils.statistics import ProcessingStats
 from utils.path_manager import PathManager
 from utils.mcp_server import DocumentMCPServer
 from utils.summarizer import Summarizer
-from utils.azure_integration import search_in_azure, index_in_azure_search
-from utils.vector_search import VectorSearcher  # Opcional, se tiver embeddings
+from utils.azure_integration import search_in_azure, index_in_azure_search, azure_gpt_chat_completion
+from utils.vector_search import VectorSearcher
 
 warnings.filterwarnings("ignore")
 load_dotenv()
@@ -42,24 +42,20 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 queue_manager = None
 mcp_server = None
-summarizer = Summarizer()  # Instância global do sumarizador
-vector_searcher = VectorSearcher()  # Instância global do vector search (opcional)
-
+summarizer = Summarizer()
+vector_searcher = VectorSearcher()
 
 class Mensagem(BaseModel):
     role: str
     content: str
 
-
 class ConsultaRequest(BaseModel):
     pergunta: str
     historico: List[Mensagem] = []
 
-
 @app.on_event("startup")
 async def startup_event():
     global mcp_server, queue_manager
-    
     try:
         logger.info("[STARTUP] Iniciando inicialização...")
         
@@ -75,7 +71,6 @@ async def startup_event():
         queue_manager = QueueManager(AMQP_URL, mcp_server)
         await queue_manager.initialize()
 
-        # Configura consumidores
         await queue_manager.setup_consumer('audio_processing', queue_manager.process_audio_message)
         await queue_manager.setup_consumer('document_processing', queue_manager.process_document_message)
         await queue_manager.setup_consumer('image_processing', queue_manager.process_image_message)
@@ -86,7 +81,6 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Erro na inicialização: {e}")
         raise
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -100,7 +94,6 @@ async def shutdown_event():
     except Exception as e:
         logger.error(f"[SHUTDOWN] Erro ao finalizar conexões: {str(e)}")
 
-
 def get_file_type(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     if ext in ['.mp3', '.wav', '.ogg', '.opus', '.m4a']:
@@ -112,7 +105,6 @@ def get_file_type(filename: str) -> str:
     elif ext in ['.mp4', '.avi', '.mov']:
         return 'video'
     return None
-
 
 async def process_zip(zip_path: Path):
     try:
@@ -161,10 +153,9 @@ async def process_zip(zip_path: Path):
         logger.error("[ZIP] Erro processando ZIP: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
-
 async def process_single_file(file_path: Path, file_name: str, file_type: str):
     if file_type == 'audio':
-        transcription = await mcp_server.audio_processor.transcribe_audio(str(file_path))
+        transcription = await mcp_server.process_audio(str(file_path), file_name)
         summary = summarizer.summarize(transcription, max_length=100)
         return {
             "type": "audio",
@@ -176,7 +167,7 @@ async def process_single_file(file_path: Path, file_name: str, file_type: str):
             }
         }
     elif file_type == 'image':
-        text = await mcp_server.image_processor.process(str(file_path))
+        text = await mcp_server.process_image(str(file_path), file_name)
         summary = summarizer.summarize(text, max_length=100)
         return {
             "type": "image",
@@ -188,7 +179,7 @@ async def process_single_file(file_path: Path, file_name: str, file_type: str):
             }
         }
     elif file_type == 'document':
-        text = await mcp_server.document_processor.process(str(file_path))
+        text = await mcp_server.process_document(str(file_path), file_name)
         summary = summarizer.summarize(text, max_length=100)
         return {
             "type": "document",
@@ -200,7 +191,7 @@ async def process_single_file(file_path: Path, file_name: str, file_type: str):
             }
         }
     elif file_type == 'video':
-        text = await mcp_server.video_processor.process(str(file_path))
+        text = await mcp_server.process_video(str(file_path), file_name)
         summary = summarizer.summarize(text, max_length=100)
         return {
             "type": "video",
@@ -214,7 +205,6 @@ async def process_single_file(file_path: Path, file_name: str, file_type: str):
     else:
         logger.warning("Tipo de arquivo não suportado.")
         return None
-
 
 @app.post("/upload")
 async def upload_file(file: UploadFile):
@@ -232,82 +222,37 @@ async def upload_file(file: UploadFile):
         logger.error("[UPLOAD] Erro no upload: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/consultar")
-async def consultar(request: ConsultaRequest):
-    try:
-        # Convertemos o historico (lista de Mensagem) em lista de dicts
-        historico_limitado = request.historico[-2:] if len(request.historico) > 2 else request.historico
-        historico_dicts = [{"role": m.role, "content": m.content} for m in historico_limitado]
+async def consultar(request: ConsultaRequest, skip: int = 0, top: int = 50):
+    pergunta = request.pergunta.strip()
+    docs_page = await search_in_azure(pergunta, skip=skip, top=top)
+    total_count = docs_page.get('total_count', 0)
+    results = docs_page.get('results', [])
 
-        pergunta = request.pergunta.lower()
+    if not results:
+        return {"resposta": "Não encontrei documentos relevantes.", "results": [], "total_count": total_count}
 
-        # Definindo paginação padrão
-        skip = 0
-        top = 50
+    contexto = ""
+    for d in results:
+        trecho = d.get('content', '')
+        contexto += f"[{d['id']} - {d['file_name']} - {d['file_type']}]: {trecho}\n\n"
 
-        if "quantos documentos" in pergunta or "quantidade de documentos" in pergunta:
-            docs = await search_in_azure("*", skip=skip, top=1)
-            resposta = f"Não tenho informação da contagem total. Retornei {len(docs)} documentos nesta página."
-            return {"resposta": resposta}
+    resposta = await azure_gpt_chat_completion(query=pergunta, context=contexto)
 
-        elif "overview" in pergunta or "resumo de todos" in pergunta or "o que todos os documentos" in pergunta:
-            docs = await search_in_azure("*", skip=0, top=50)
-            all_summaries = []
-            for d in docs:
-                short_summary = summarizer.summarize(d['content'], max_length=50)
-                all_summaries.append(f"Documento {d['id']} ({d['file_name']}): {short_summary}")
-            combined_text = "\n".join(all_summaries)
-            final_overview = summarizer.summarize(combined_text, max_length=200)
-            return {"resposta": final_overview}
-
-        elif "sobre" in pergunta or "assunto" in pergunta or "tema" in pergunta:
-            palavras = pergunta.split()
-            keyword = palavras[-1]
-
-            doc_ids_vector = vector_searcher.search(keyword, top=10)
-            if not doc_ids_vector:
-                docs = await search_in_azure(keyword, skip=0, top=10)
-            else:
-                docs = await search_in_azure(keyword, skip=0, top=10)
-
-            contexto = ""
-            for d in docs:
-                trecho = d['content'][:200]
-                contexto += f"[Doc {d['id']} - {d['file_name']}: {trecho}]\n"
-            resposta = await mcp_server.process_query(request.pergunta, historico_dicts, contexto=contexto)
-            return {"resposta": resposta}
-
-        else:
-            vdocs = vector_searcher.search(request.pergunta, top=5)
-            if not vdocs:
-                docs = await search_in_azure(request.pergunta, skip=0, top=5)
-            else:
-                docs = await search_in_azure(request.pergunta, skip=0, top=5)
-
-            contexto = ""
-            for d in docs:
-                trecho = d['content'][:300]
-                contexto += f"[Doc {d['id']} ({d['file_name']}): {trecho}]\n"
-
-            resposta = await mcp_server.process_query(request.pergunta, historico_dicts, contexto=contexto)
-            return {"resposta": resposta}
-
-    except Exception as e:
-        logger.error("Erro na consulta: %s", str(e))
-        return {"resposta": f"Erro ao processar consulta: {str(e)}"}
-
+    return {
+        "resposta": resposta.strip(),
+        "results": results,
+        "total_count": total_count
+    }
 
 @app.get("/status")
 async def check_status():
     return {"status": "running"}
 
-
 @app.post("/purge-queues")
 async def purge_queues():
     await queue_manager.purge_queues()
     return {"message": "Filas limpas"}
-
 
 @app.post("/process-file")
 async def process_file(file: UploadFile):
@@ -337,7 +282,6 @@ async def process_file(file: UploadFile):
     except Exception as e:
         logger.error("[PROCESS_FILE] Erro processando arquivo: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
-
 
 if __name__ == "__main__":
     import uvicorn
